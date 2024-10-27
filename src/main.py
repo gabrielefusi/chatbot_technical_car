@@ -1,40 +1,50 @@
+# Set your API key to a variable
 import os
-from dotenv import load_dotenv
+openai_api_key = os.environ["OpenAi1"]
+
+# Import the required packages
+import langchain
 from langchain import PromptTemplate
 from langchain_openai import ChatOpenAI
+from langchain.document_loaders import UnstructuredHTMLLoader
+from langchain_openai import OpenAIEmbeddings
 from langchain.schema.runnable import RunnablePassthrough
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.vectorstores import Chroma
+from langchain_community.document_loaders import UnstructuredHTMLLoader
 
-from src.load_data import load_car_docs
-from src.embed_store import create_embedding_and_store
-from src.retriever.py import create_retriever
+# Load the HTML as a LangChain document loader
+loader = UnstructuredHTMLLoader(file_path="data/mg-zs-warning-messages.html")
+car_docs = loader.load()
 
-load_dotenv()
+# Initialize RecursiveCharacterTextSplitter to make chunks of HTML text
+text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
 
-# Load API key
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
-    raise ValueError("OpenAI API key not found! Check your .env file.")
+# Split GDPR HTML
+splits = text_splitter.split_documents(car_docs)
 
-# Step 1: Load documents
-docs = load_car_docs("data/mg-zs-warning-messages.html")
+# Initialize Chroma vectorstore with documents as splits and using OpenAIEmbeddings
+vectorstore = Chroma.from_documents(documents=splits, embedding=OpenAIEmbeddings(openai_api_key=openai_api_key))
 
-# Step 2: Embed and store documents
-vector_store = create_embedding_and_store(docs, persist_directory="db")
+# Setup vectorstore as retriever
+retriever = vectorstore.as_retriever()
 
-# Step 3: Create a retriever
-retriever = create_retriever(vector_store)
+# Define RAG prompt
+prompt = PromptTemplate(input_variables=['question', 'context'], template="You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question. If you don't know the answer, just say that you don't know. Use three sentences maximum and keep the answer concise.\nQuestion: {question} \nContext: {context} \nAnswer:")
 
-# Step 4: Define LLM and prompt template
-model = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
-prompt = PromptTemplate(
-    input_variables=["context", "question"],
-    template="You are a car assistant. Based on the following context, answer the question.\n\nContext: {context}\n\nQuestion: {question}"
+# Initialize chat-based LLM with 0 temperature and using GPT-3.5 Turbo
+model = ChatOpenAI(openai_api_key=openai_api_key, model_name="gpt-3.5-turbo", temperature=0)
+
+# Setup the chain
+rag_chain = (
+    {"context": retriever , "question": RunnablePassthrough()}
+    | prompt
+    | model
 )
 
-# Step 5: Define RAG chain
-rag_chain = ({"context": retriever, "question": RunnablePassthrough()} | prompt | model)
+# Initialize query
+query = "The Gasoline Particular Filter Full warning has appeared. What does this mean and what should I do about it?"
 
-# Step 6: Invoke RAG chain with a sample query
-query = "What does the Cruise Control Fault mean?"
-result = rag_chain.invoke({"question": query})
-print("Response:", result)
+# Invoke the query
+answer = rag_chain.invoke(query).content
+print(answer)
